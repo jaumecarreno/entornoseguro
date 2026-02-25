@@ -51,6 +51,31 @@ export const pauseSchema = z.object({
   reason: z.string().min(3).max(250),
 });
 
+export const evaluateCampaignRiskSchema = z.object({
+  note: z.string().min(3).max(250).optional(),
+});
+
+export const policyReviewSchema = z.object({
+  decision: z.enum(["approve_for_restriction", "dismiss"]),
+  note: z.string().min(3).max(250),
+});
+
+export const tenantRestrictSchema = z
+  .object({
+    restricted: z.boolean(),
+    reason: z.string().min(3).max(250),
+    policyViolationId: z.string().min(1).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.restricted && !data.policyViolationId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["policyViolationId"],
+        message: "policyViolationId is required when restricted=true",
+      });
+    }
+  });
+
 export const timelineScopeSchema = z.object({
   scope: z.enum(["demo", "real", "all"]).default("all"),
 });

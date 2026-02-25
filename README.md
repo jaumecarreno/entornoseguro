@@ -1,6 +1,6 @@
-# EntornoSeguro - Stage 2 (v2.1)
+# EntornoSeguro - Stage 3 (v2.1)
 
-Stage 2 extends the demo-first SaaS flow with real campaign dispatch logic, event ingestion, and training completion:
+Stage 3 keeps the Stage 2 execution flow and adds conservative hardening:
 
 - signup tenant
 - setup target/sending domains
@@ -12,12 +12,15 @@ Stage 2 extends the demo-first SaaS flow with real campaign dispatch logic, even
 - run employee events (`click`, `report`, `credential_submit_simulated`)
 - start + complete training session with quiz attempt
 - load employee timeline/history with recorded events
+- compute explainable risk overview on demand
+- evaluate campaign risk with conservative thresholds
+- review policy violations manually before restricting a tenant
 
 Delivery remains mock-provider based by default for safe pilot execution.
 
 ## Repo Structure
 
-- `apps/api`: Fastify API for Stage 2 business flow
+- `apps/api`: Fastify API for Stage 3 business flow
 - `apps/web`: Next.js demo UI
 - `packages/shared`: shared schemas, types, pause precedence logic
 - `packages/db`: JSON persistence layer and data models
@@ -64,3 +67,4 @@ Web: `http://localhost:3000`
 - Pause controls block new scheduling/send actions and do not block webhook/event ingestion.
 - Credential submit simulation never persists password values in storage.
 - JSON storage is intentionally lean for pilots and demo scenarios.
+- Manual restriction is never automatic: a policy violation must be reviewed and approved first.

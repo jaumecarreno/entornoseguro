@@ -11,6 +11,7 @@ type MeResponse = {
     id: string;
     name: string;
     slug: string;
+    status: "active" | "restricted";
     lifecycleMode: "sandbox" | "production";
     defaultSendingMode: SendingMode;
     sendPaused: boolean;
@@ -67,6 +68,38 @@ type TimelinePayload = {
   events: Array<{ type: string; at: string; detail: string; dataClass: string }>;
 };
 
+type PolicyViolation = {
+  id: string;
+  campaignId: string | null;
+  type: "high_credential_submit_rate" | "low_report_rate" | "high_click_rate";
+  severity: "medium" | "high";
+  status: "open" | "approved_for_restriction" | "dismissed";
+  summary: string;
+  threshold: number;
+  observed: number;
+  sampleSize: number;
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+};
+
+type RiskOverview = {
+  score: number;
+  level: "low" | "medium" | "high";
+  metrics: {
+    recipients: number;
+    clickRate: number;
+    credentialSubmitRate: number;
+    reportRate: number;
+    trainingCompletionRate: number;
+    repeatSusceptibilityRate: number;
+    medianTimeToReportMinutes: number | null;
+    openRate: number;
+  };
+  breakdown: Array<{ metric: string; weight: number; value: number; contribution: number }>;
+  unresolvedViolations: { total: number; highSeverity: number };
+};
+
 const defaultCsv = `email,full_name,department\nalice@demo.local,Alice Ruiz,Finance\nbob@demo.local,Bob Vidal,Sales`;
 
 function makeEventId(prefix: string): string {
@@ -82,6 +115,8 @@ export default function HomePage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [auditItems, setAuditItems] = useState<Array<{ action: string; createdAt: string; reason: string | null }>>([]);
+  const [policyViolations, setPolicyViolations] = useState<PolicyViolation[]>([]);
+  const [riskOverview, setRiskOverview] = useState<RiskOverview | null>(null);
 
   const [signupCompany, setSignupCompany] = useState("Acme Pyme");
   const [signupEmail, setSignupEmail] = useState("owner@acme.test");
@@ -125,9 +160,12 @@ export default function HomePage() {
   const [globalPauseReason, setGlobalPauseReason] = useState("Maintenance window");
   const [tenantPauseReason, setTenantPauseReason] = useState("Tenant pause");
   const [campaignPauseReason, setCampaignPauseReason] = useState("Campaign pause");
+  const [riskReviewNote, setRiskReviewNote] = useState("Conservative manual review");
+  const [restrictionReason, setRestrictionReason] = useState("Manual restriction after policy review");
 
   const currentCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null;
   const selectedRecipient = recipients.find((recipient) => recipient.id === selectedRecipientId) ?? null;
+  const approvedViolation = policyViolations.find((violation) => violation.status === "approved_for_restriction") ?? null;
 
   const sendingDomainOptions = useMemo(() => {
     if (!me) {
@@ -153,7 +191,7 @@ export default function HomePage() {
   }
 
   async function refreshAll(sessionToken: string): Promise<void> {
-    const [meData, employeesData, campaignsData, auditData] = await Promise.all([
+    const [meData, employeesData, campaignsData, auditData, policyData] = await Promise.all([
       apiFetch<MeResponse>("/me", {}, sessionToken),
       apiFetch<{ items: Employee[] }>("/employees", {}, sessionToken),
       apiFetch<{ items: Campaign[] }>("/campaigns", {}, sessionToken),
@@ -162,12 +200,14 @@ export default function HomePage() {
         {},
         sessionToken,
       ),
+      apiFetch<{ items: PolicyViolation[] }>("/ops/policy-violations", {}, sessionToken),
     ]);
 
     setMe(meData);
     setEmployees(employeesData.items);
     setCampaigns(campaignsData.items);
     setAuditItems(auditData.items);
+    setPolicyViolations(policyData.items);
 
     if (campaignsData.items.length > 0 && !selectedCampaignId) {
       setSelectedCampaignId(campaignsData.items[0].id);
@@ -644,6 +684,110 @@ export default function HomePage() {
     }
   }
 
+  async function handleLoadRiskOverview(): Promise<void> {
+    if (!token) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const payload = await apiFetch<RiskOverview>("/risk/overview", {}, token);
+      setRiskOverview(payload);
+      setSuccess(`Risk overview cargado. Score=${payload.score} (${payload.level}).`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleEvaluateCampaignRisk(): Promise<void> {
+    if (!token || !selectedCampaignId) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const payload = await apiFetch<{
+        evaluationReady: boolean;
+        createdViolations: PolicyViolation[];
+        matchedViolations: PolicyViolation[];
+      }>(
+        `/campaigns/${selectedCampaignId}/evaluate-risk`,
+        {
+          method: "POST",
+          body: JSON.stringify({ note: "manual evaluation from ui" }),
+        },
+        token,
+      );
+      await refreshAll(token);
+      await handleLoadRiskOverview();
+      setSuccess(
+        `Evaluación completada. ready=${payload.evaluationReady}, created=${payload.createdViolations.length}, matched=${payload.matchedViolations.length}.`,
+      );
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleReviewPolicyViolation(
+    violationId: string,
+    decision: "approve_for_restriction" | "dismiss",
+  ): Promise<void> {
+    if (!token) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      await apiFetch(
+        `/ops/policy-violations/${violationId}/review`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            decision,
+            note: riskReviewNote,
+          }),
+        },
+        token,
+      );
+      await refreshAll(token);
+      setSuccess(`Policy violation revisada: ${decision}.`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleRestrictTenant(restricted: boolean): Promise<void> {
+    if (!token || !me) {
+      return;
+    }
+    clearNotices();
+
+    if (restricted && !approvedViolation) {
+      setError("Necesitas una policy violation en estado approved_for_restriction antes de restringir.");
+      return;
+    }
+
+    try {
+      await apiFetch(
+        `/ops/tenants/${me.tenant.id}/restrict`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            restricted,
+            reason: restrictionReason,
+            policyViolationId: restricted ? approvedViolation?.id : undefined,
+          }),
+        },
+        token,
+      );
+      await refreshAll(token);
+      await handleLoadRiskOverview();
+      setSuccess(`Tenant status actualizado: ${restricted ? "restricted" : "active"}.`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
   async function handlePauseGlobal(paused: boolean): Promise<void> {
     if (!token) {
       return;
@@ -713,9 +857,9 @@ export default function HomePage() {
   return (
     <main>
       <div className="card">
-        <h1>EntornoSeguro - Stage 2 Demo</h1>
+        <h1>EntornoSeguro - Stage 3 Demo</h1>
         <p className="muted">
-          Flujo visible: signup - setup domains - import CSV - campaign preview - schedule - dispatch - events - training - timeline.
+          Flujo visible: signup - setup domains - import CSV - campaign preview - schedule - dispatch - events - training - timeline - risk review.
         </p>
         <div className="inline">
           <span className="badge">demo-only</span>
@@ -907,7 +1051,7 @@ export default function HomePage() {
                 Schedule
               </button>
               <button type="button" className="secondary" onClick={handleDispatchCampaign} disabled={!selectedCampaignId}>
-                Dispatch (Stage 2)
+                Dispatch
               </button>
             </div>
 
@@ -1091,7 +1235,118 @@ export default function HomePage() {
           </section>
 
           <section className="card">
-            <h2>7) Pause controls (global {">"} tenant {">"} campaign)</h2>
+            <h2>7) Stage 3: risk + manual enforcement</h2>
+            <p className="muted">
+              Score explicable con umbrales conservadores. Restricción de tenant solo con revisión manual.
+            </p>
+            <p>
+              Tenant status: <strong>{me.tenant.status}</strong>
+            </p>
+            <div className="inline">
+              <button type="button" className="secondary" onClick={handleLoadRiskOverview}>
+                Load risk overview
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={handleEvaluateCampaignRisk}
+                disabled={!selectedCampaignId}
+              >
+                Evaluate selected campaign
+              </button>
+            </div>
+
+            {riskOverview ? (
+              <div>
+                <p className="muted">
+                  Score: <strong>{riskOverview.score}</strong> ({riskOverview.level})
+                </p>
+                <p className="muted">
+                  click={riskOverview.metrics.clickRate} | credential submit={riskOverview.metrics.credentialSubmitRate} | report=
+                  {riskOverview.metrics.reportRate} | completion={riskOverview.metrics.trainingCompletionRate}
+                </p>
+                <p className="muted">
+                  repeat susceptibility={riskOverview.metrics.repeatSusceptibilityRate} | median time to report=
+                  {riskOverview.metrics.medianTimeToReportMinutes ?? "-"} min | open (secondary)={riskOverview.metrics.openRate}
+                </p>
+                <p className="muted">
+                  unresolved violations={riskOverview.unresolvedViolations.total} (high={riskOverview.unresolvedViolations.highSeverity})
+                </p>
+              </div>
+            ) : null}
+
+            <h3>Policy violations</h3>
+            {policyViolations.length === 0 ? <p className="muted">No policy violations yet.</p> : null}
+            <ul className="list">
+              {policyViolations.slice(0, 8).map((violation) => (
+                <li key={violation.id}>
+                  <div>
+                    <strong>{violation.type}</strong> ({violation.severity}) - {violation.status}
+                  </div>
+                  <div className="muted">
+                    observed={violation.observed} threshold={violation.threshold} sample={violation.sampleSize}
+                  </div>
+                  <div className="muted">{violation.summary}</div>
+                  {violation.status === "open" ? (
+                    <div className="inline">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handleReviewPolicyViolation(violation.id, "approve_for_restriction")}
+                      >
+                        Approve for restriction
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handleReviewPolicyViolation(violation.id, "dismiss")}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+
+            <label htmlFor="risk-review-note">Review note</label>
+            <input
+              id="risk-review-note"
+              value={riskReviewNote}
+              onChange={(event) => setRiskReviewNote(event.target.value)}
+            />
+
+            <label htmlFor="restriction-reason">Restriction reason</label>
+            <input
+              id="restriction-reason"
+              value={restrictionReason}
+              onChange={(event) => setRestrictionReason(event.target.value)}
+            />
+            <div className="inline">
+              <button
+                type="button"
+                className="danger"
+                onClick={() => handleRestrictTenant(true)}
+                disabled={me.tenant.status === "restricted" || !approvedViolation}
+              >
+                Restrict tenant
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => handleRestrictTenant(false)}
+                disabled={me.tenant.status !== "restricted"}
+              >
+                Lift tenant restriction
+              </button>
+            </div>
+            <p className="muted">
+              Restrict button requires one violation reviewed as <strong>approved_for_restriction</strong>.
+            </p>
+          </section>
+
+          <section className="card">
+            <h2>8) Pause controls (global {">"} tenant {">"} campaign)</h2>
             <p className="muted">
               Bloquean nuevos envíos/programaciones; no bloquean ingestión de eventos.
             </p>
@@ -1155,7 +1410,7 @@ export default function HomePage() {
           </section>
 
           <section className="card">
-            <h2>8) Audit log (critical actions)</h2>
+            <h2>9) Audit log (critical actions)</h2>
             <ul className="list">
               {auditItems.slice(0, 12).map((item, index) => (
                 <li key={`${item.action}-${index}`}>

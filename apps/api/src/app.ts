@@ -7,6 +7,7 @@ import {
   type AdminUser,
   type Campaign,
   type CampaignRecipient,
+  type PolicyViolation,
   type RecipientEvent,
   type Tenant,
   type TrainingSession,
@@ -16,8 +17,12 @@ import {
   createCampaignSchema,
   credentialSubmitSchema,
   dispatchCampaignSchema,
+  evaluateCampaignRiskSchema,
   providerWebhookBatchSchema,
+  policyReviewSchema,
+  type PolicyReviewDecision,
   trackingTokenEventSchema,
+  tenantRestrictSchema,
   trainingCompleteSchema,
   trainingStartSchema,
   createSendingDomainSchema,
@@ -53,6 +58,291 @@ interface ActorContext {
 }
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const riskPolicyConfig = {
+  minRecipientsForEvaluation: 10,
+  highCredentialSubmitRate: 0.35,
+  lowReportRate: 0.03,
+  highClickRate: 0.7,
+} as const;
+
+type RiskOverview = {
+  tenantId: string;
+  score: number;
+  level: "low" | "medium" | "high";
+  metrics: {
+    recipients: number;
+    clickRate: number;
+    credentialSubmitRate: number;
+    reportRate: number;
+    trainingCompletionRate: number;
+    repeatSusceptibilityRate: number;
+    medianTimeToReportMinutes: number | null;
+    openRate: number;
+  };
+  breakdown: Array<{
+    metric: string;
+    weight: number;
+    value: number;
+    contribution: number;
+  }>;
+  unresolvedViolations: {
+    total: number;
+    highSeverity: number;
+  };
+};
+
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) {
+    return min;
+  }
+  if (value > max) {
+    return max;
+  }
+  return value;
+}
+
+function safeRate(part: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return part / total;
+}
+
+function toRoundedRate(value: number): number {
+  return Number(value.toFixed(4));
+}
+
+function calculateMedian(values: number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return Number(((sorted[middle - 1] + sorted[middle]) / 2).toFixed(2));
+  }
+  return Number(sorted[middle].toFixed(2));
+}
+
+function mapRecipientIdsByEventType(events: RecipientEvent[]): Map<RecipientEvent["eventType"], Set<string>> {
+  const mapped = new Map<RecipientEvent["eventType"], Set<string>>();
+  for (const event of events) {
+    if (!mapped.has(event.eventType)) {
+      mapped.set(event.eventType, new Set());
+    }
+    mapped.get(event.eventType)!.add(event.campaignRecipientId);
+  }
+  return mapped;
+}
+
+function buildRiskOverview(data: {
+  campaigns: Campaign[];
+  campaignRecipients: CampaignRecipient[];
+  recipientEvents: RecipientEvent[];
+  policyViolations: PolicyViolation[];
+  tenantId: string;
+}): RiskOverview {
+  const tenantRecipients = data.campaignRecipients.filter((recipient) => recipient.tenantId === data.tenantId);
+  const recipientIds = new Set(tenantRecipients.map((recipient) => recipient.id));
+  const recipientById = new Map(tenantRecipients.map((recipient) => [recipient.id, recipient]));
+  const tenantEvents = data.recipientEvents.filter((event) => recipientIds.has(event.campaignRecipientId));
+  const eventRecipientIds = mapRecipientIdsByEventType(tenantEvents);
+
+  const totalRecipients = tenantRecipients.length;
+  const clickCount = eventRecipientIds.get("click")?.size ?? 0;
+  const credentialCount = eventRecipientIds.get("credential_submit_simulated")?.size ?? 0;
+  const reportCount = eventRecipientIds.get("reported")?.size ?? 0;
+  const trainingCompletedCount = eventRecipientIds.get("training_completed")?.size ?? 0;
+  const openCount = eventRecipientIds.get("open")?.size ?? 0;
+
+  const clickRate = safeRate(clickCount, totalRecipients);
+  const credentialSubmitRate = safeRate(credentialCount, totalRecipients);
+  const reportRate = safeRate(reportCount, totalRecipients);
+  const trainingCompletionRate = safeRate(trainingCompletedCount, totalRecipients);
+  const openRate = safeRate(openCount, totalRecipients);
+
+  const recipientFirstClickAt = new Map<string, string>();
+  const recipientFirstReportAt = new Map<string, string>();
+  for (const event of tenantEvents) {
+    if (event.eventType === "click" && !recipientFirstClickAt.has(event.campaignRecipientId)) {
+      recipientFirstClickAt.set(event.campaignRecipientId, event.occurredAt);
+    }
+    if (event.eventType === "reported" && !recipientFirstReportAt.has(event.campaignRecipientId)) {
+      recipientFirstReportAt.set(event.campaignRecipientId, event.occurredAt);
+    }
+  }
+  const reportTimesInMinutes: number[] = [];
+  for (const [recipientId, clickedAt] of recipientFirstClickAt.entries()) {
+    const reportedAt = recipientFirstReportAt.get(recipientId);
+    if (!reportedAt) {
+      continue;
+    }
+    const deltaMs = new Date(reportedAt).getTime() - new Date(clickedAt).getTime();
+    if (deltaMs >= 0) {
+      reportTimesInMinutes.push(deltaMs / (1000 * 60));
+    }
+  }
+  const medianTimeToReportMinutes = calculateMedian(reportTimesInMinutes);
+
+  const campaignsByRecipientId = new Map<string, string>();
+  for (const recipient of tenantRecipients) {
+    campaignsByRecipientId.set(recipient.id, recipient.campaignId);
+  }
+  const credentialCampaignsByEmployee = new Map<string, Set<string>>();
+  for (const event of tenantEvents) {
+    if (event.eventType !== "credential_submit_simulated") {
+      continue;
+    }
+    const recipient = recipientById.get(event.campaignRecipientId);
+    if (!recipient) {
+      continue;
+    }
+    if (!credentialCampaignsByEmployee.has(recipient.employeeId)) {
+      credentialCampaignsByEmployee.set(recipient.employeeId, new Set());
+    }
+    const campaignId = campaignsByRecipientId.get(recipient.id);
+    if (campaignId) {
+      credentialCampaignsByEmployee.get(recipient.employeeId)!.add(campaignId);
+    }
+  }
+  const targetedEmployeeIds = new Set(tenantRecipients.map((recipient) => recipient.employeeId));
+  const repeatSusceptibleEmployees = [...credentialCampaignsByEmployee.values()].filter(
+    (campaigns) => campaigns.size >= 2,
+  ).length;
+  const repeatSusceptibilityRate = safeRate(repeatSusceptibleEmployees, targetedEmployeeIds.size);
+
+  const unresolved = data.policyViolations.filter(
+    (violation) => violation.tenantId === data.tenantId && violation.status !== "dismissed",
+  );
+  const unresolvedHigh = unresolved.filter((violation) => violation.severity === "high").length;
+
+  const breakdown = [
+    {
+      metric: "click_rate",
+      weight: 25,
+      value: clickRate,
+      contribution: clickRate * 25,
+    },
+    {
+      metric: "credential_submit_rate",
+      weight: 45,
+      value: credentialSubmitRate,
+      contribution: credentialSubmitRate * 45,
+    },
+    {
+      metric: "report_rate_penalty",
+      weight: 20,
+      value: 1 - reportRate,
+      contribution: (1 - reportRate) * 20,
+    },
+    {
+      metric: "repeat_susceptibility_rate",
+      weight: 10,
+      value: repeatSusceptibilityRate,
+      contribution: repeatSusceptibilityRate * 10,
+    },
+  ];
+
+  const violationContribution = Math.min(20, unresolvedHigh * 10);
+  const rawScore = breakdown.reduce((sum, item) => sum + item.contribution, 0) + violationContribution;
+  const score = Math.round(clamp(rawScore, 0, 100));
+  const level: RiskOverview["level"] = score >= 70 ? "high" : score >= 40 ? "medium" : "low";
+
+  return {
+    tenantId: data.tenantId,
+    score,
+    level,
+    metrics: {
+      recipients: totalRecipients,
+      clickRate: toRoundedRate(clickRate),
+      credentialSubmitRate: toRoundedRate(credentialSubmitRate),
+      reportRate: toRoundedRate(reportRate),
+      trainingCompletionRate: toRoundedRate(trainingCompletionRate),
+      repeatSusceptibilityRate: toRoundedRate(repeatSusceptibilityRate),
+      medianTimeToReportMinutes,
+      openRate: toRoundedRate(openRate),
+    },
+    breakdown: [
+      ...breakdown.map((item) => ({
+        metric: item.metric,
+        weight: item.weight,
+        value: toRoundedRate(item.value),
+        contribution: Number(item.contribution.toFixed(2)),
+      })),
+      {
+        metric: "unresolved_high_severity_violations",
+        weight: 10,
+        value: unresolvedHigh,
+        contribution: Number(violationContribution.toFixed(2)),
+      },
+    ],
+    unresolvedViolations: {
+      total: unresolved.length,
+      highSeverity: unresolvedHigh,
+    },
+  };
+}
+
+function upsertPolicyViolation(
+  data: {
+    policyViolations: PolicyViolation[];
+  },
+  db: JsonDatabase,
+  input: {
+    tenantId: string;
+    campaignId: string | null;
+    type: PolicyViolation["type"];
+    severity: PolicyViolation["severity"];
+    summary: string;
+    threshold: number;
+    observed: number;
+    sampleSize: number;
+  },
+): { created: boolean; violation: PolicyViolation } {
+  const existing = data.policyViolations.find(
+    (violation) =>
+      violation.tenantId === input.tenantId &&
+      violation.campaignId === input.campaignId &&
+      violation.type === input.type &&
+      violation.status !== "dismissed",
+  );
+
+  if (existing) {
+    existing.observed = input.observed;
+    existing.threshold = input.threshold;
+    existing.sampleSize = input.sampleSize;
+    existing.summary = input.summary;
+    return { created: false, violation: existing };
+  }
+
+  const violation: PolicyViolation = {
+    id: db.newId(),
+    tenantId: input.tenantId,
+    campaignId: input.campaignId,
+    type: input.type,
+    severity: input.severity,
+    status: "open",
+    summary: input.summary,
+    threshold: input.threshold,
+    observed: input.observed,
+    sampleSize: input.sampleSize,
+    createdAt: db.nowIso(),
+    reviewedAt: null,
+    reviewedByAdminId: null,
+    reviewNote: null,
+  };
+  data.policyViolations.push(violation);
+  return { created: true, violation };
+}
+
+function policyDecisionToStatus(decision: PolicyReviewDecision): PolicyViolation["status"] {
+  if (decision === "approve_for_restriction") {
+    return "approved_for_restriction";
+  }
+  return "dismissed";
+}
 
 function parseEmployeeCsv(csv: string): { rows: Array<{ email: string; fullName: string; department: string | null }>; errors: string[] } {
   const lines = csv
@@ -859,6 +1149,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
         return { error: "not_found" as const };
       }
 
+      if (tenant.status === "restricted") {
+        return { error: "tenant_restricted" as const };
+      }
+
       const pause = resolvePausePrecedence({
         globalPaused: data.system.globalSendPaused,
         tenantPaused: tenant.sendPaused,
@@ -909,6 +1203,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
       return reply.status(409).send({ error: result.pause.code, scope: result.pause.scope });
     }
 
+    if (result.error === "tenant_restricted") {
+      return reply.status(423).send({ error: "Tenant is restricted pending manual review" });
+    }
+
     if (result.error === "preview_required") {
       return reply.status(409).send({ error: "Campaign preview is required before scheduling" });
     }
@@ -941,6 +1239,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
       const campaign = data.campaigns.find((candidate) => candidate.id === id && candidate.tenantId === actor.tenant.id);
       if (!tenant || !campaign) {
         return { error: "not_found" as const };
+      }
+
+      if (tenant.status === "restricted") {
+        return { error: "tenant_restricted" as const };
       }
 
       const pause = resolvePausePrecedence({
@@ -1087,6 +1389,9 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
     }
     if (result.error === "paused") {
       return reply.status(409).send({ error: result.pause.code, scope: result.pause.scope });
+    }
+    if (result.error === "tenant_restricted") {
+      return reply.status(423).send({ error: "Tenant is restricted pending manual review" });
     }
     if (result.error === "schedule_required") {
       return reply.status(409).send({ error: "Campaign must be scheduled before dispatch" });
@@ -1643,6 +1948,323 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
     }
 
     return reply.send(payload);
+  });
+
+  app.get("/risk/overview", async (request, reply) => {
+    const actor = await getActorContext(request, reply, db);
+    if (!actor) {
+      return;
+    }
+
+    const risk = await db.read((data) =>
+      buildRiskOverview({
+        campaigns: data.campaigns,
+        campaignRecipients: data.campaignRecipients,
+        recipientEvents: data.recipientEvents,
+        policyViolations: data.policyViolations,
+        tenantId: actor.tenant.id,
+      }),
+    );
+
+    return reply.send(risk);
+  });
+
+  app.post("/campaigns/:id/evaluate-risk", async (request, reply) => {
+    const actor = await getActorContext(request, reply, db);
+    if (!actor) {
+      return;
+    }
+
+    const parsed = evaluateCampaignRiskSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+
+    const { id } = request.params as { id: string };
+    const result = await db.write((data) => {
+      const campaign = data.campaigns.find((candidate) => candidate.id === id && candidate.tenantId === actor.tenant.id);
+      if (!campaign) {
+        return { error: "not_found" as const };
+      }
+
+      const campaignRecipients = data.campaignRecipients.filter((recipient) => recipient.campaignId === campaign.id);
+      const recipientIds = new Set(campaignRecipients.map((recipient) => recipient.id));
+      const campaignEvents = data.recipientEvents.filter((event) => recipientIds.has(event.campaignRecipientId));
+      const recipientIdsByEventType = mapRecipientIdsByEventType(campaignEvents);
+
+      const sampleSize = campaignRecipients.length;
+      const clickCount = recipientIdsByEventType.get("click")?.size ?? 0;
+      const credentialCount = recipientIdsByEventType.get("credential_submit_simulated")?.size ?? 0;
+      const reportCount = recipientIdsByEventType.get("reported")?.size ?? 0;
+
+      const clickRate = safeRate(clickCount, sampleSize);
+      const credentialSubmitRate = safeRate(credentialCount, sampleSize);
+      const reportRate = safeRate(reportCount, sampleSize);
+
+      const createdViolations: PolicyViolation[] = [];
+      const allMatchedViolations: PolicyViolation[] = [];
+      const evaluationReady = sampleSize >= riskPolicyConfig.minRecipientsForEvaluation;
+
+      if (evaluationReady && credentialSubmitRate >= riskPolicyConfig.highCredentialSubmitRate) {
+        const upsert = upsertPolicyViolation(data, db, {
+          tenantId: actor.tenant.id,
+          campaignId: campaign.id,
+          type: "high_credential_submit_rate",
+          severity: "high",
+          summary: "Credential submit rate exceeded conservative threshold",
+          threshold: riskPolicyConfig.highCredentialSubmitRate,
+          observed: credentialSubmitRate,
+          sampleSize,
+        });
+        if (upsert.created) {
+          createdViolations.push(upsert.violation);
+        }
+        allMatchedViolations.push(upsert.violation);
+      }
+
+      if (
+        evaluationReady &&
+        clickRate >= 0.2 &&
+        reportRate <= riskPolicyConfig.lowReportRate
+      ) {
+        const upsert = upsertPolicyViolation(data, db, {
+          tenantId: actor.tenant.id,
+          campaignId: campaign.id,
+          type: "low_report_rate",
+          severity: "medium",
+          summary: "Report rate stayed below conservative threshold",
+          threshold: riskPolicyConfig.lowReportRate,
+          observed: reportRate,
+          sampleSize,
+        });
+        if (upsert.created) {
+          createdViolations.push(upsert.violation);
+        }
+        allMatchedViolations.push(upsert.violation);
+      }
+
+      if (evaluationReady && clickRate >= riskPolicyConfig.highClickRate) {
+        const upsert = upsertPolicyViolation(data, db, {
+          tenantId: actor.tenant.id,
+          campaignId: campaign.id,
+          type: "high_click_rate",
+          severity: "medium",
+          summary: "Click rate exceeded conservative threshold",
+          threshold: riskPolicyConfig.highClickRate,
+          observed: clickRate,
+          sampleSize,
+        });
+        if (upsert.created) {
+          createdViolations.push(upsert.violation);
+        }
+        allMatchedViolations.push(upsert.violation);
+      }
+
+      data.auditLogs.push({
+        id: db.newId(),
+        tenantId: actor.tenant.id,
+        actorType: "admin",
+        actorId: actor.admin.id,
+        action: "campaign.evaluate_risk",
+        resourceType: "campaign",
+        resourceId: campaign.id,
+        reason: parsed.data.note ?? null,
+        metadata: {
+          sampleSize,
+          clickRate,
+          credentialSubmitRate,
+          reportRate,
+          evaluationReady,
+          createdViolations: createdViolations.length,
+        },
+        createdAt: db.nowIso(),
+      });
+
+      return {
+        campaignId: campaign.id,
+        evaluationReady,
+        thresholds: riskPolicyConfig,
+        metrics: {
+          sampleSize,
+          clickRate: toRoundedRate(clickRate),
+          credentialSubmitRate: toRoundedRate(credentialSubmitRate),
+          reportRate: toRoundedRate(reportRate),
+        },
+        createdViolations,
+        matchedViolations: allMatchedViolations,
+      };
+    });
+
+    if (result.error === "not_found") {
+      return reply.status(404).send({ error: "Campaign not found" });
+    }
+
+    return reply.send(result);
+  });
+
+  app.get("/ops/policy-violations", async (request, reply) => {
+    const actor = await getActorContext(request, reply, db);
+    if (!actor) {
+      return;
+    }
+
+    const violations = await db.read((data) =>
+      data.policyViolations
+        .filter((violation) => violation.tenantId === actor.tenant.id)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    );
+
+    return reply.send({ items: violations });
+  });
+
+  app.post("/ops/policy-violations/:id/review", async (request, reply) => {
+    const actor = await getActorContext(request, reply, db);
+    if (!actor) {
+      return;
+    }
+
+    const parsed = policyReviewSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+
+    const { id } = request.params as { id: string };
+    const updated = await db.write((data) => {
+      const violation = data.policyViolations.find(
+        (candidate) => candidate.id === id && candidate.tenantId === actor.tenant.id,
+      );
+      if (!violation) {
+        return null;
+      }
+
+      violation.status = policyDecisionToStatus(parsed.data.decision);
+      violation.reviewedAt = db.nowIso();
+      violation.reviewedByAdminId = actor.admin.id;
+      violation.reviewNote = parsed.data.note;
+
+      data.auditLogs.push({
+        id: db.newId(),
+        tenantId: actor.tenant.id,
+        actorType: "admin",
+        actorId: actor.admin.id,
+        action: "policy_violation.review",
+        resourceType: "policy_violation",
+        resourceId: violation.id,
+        reason: parsed.data.note,
+        metadata: { decision: parsed.data.decision, status: violation.status },
+        createdAt: db.nowIso(),
+      });
+
+      return violation;
+    });
+
+    if (!updated) {
+      return reply.status(404).send({ error: "Policy violation not found" });
+    }
+
+    return reply.send(updated);
+  });
+
+  app.post("/ops/tenants/:id/restrict", async (request, reply) => {
+    const actor = await getActorContext(request, reply, db);
+    if (!actor) {
+      return;
+    }
+
+    const { id } = request.params as { id: string };
+    if (id !== actor.tenant.id) {
+      return reply.status(403).send({ error: "Forbidden" });
+    }
+
+    const parsed = tenantRestrictSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+
+    const result = await db.write((data) => {
+      const tenant = data.tenants.find((candidate) => candidate.id === id);
+      if (!tenant) {
+        return { error: "not_found" as const };
+      }
+
+      if (parsed.data.restricted) {
+        const violation = data.policyViolations.find(
+          (candidate) =>
+            candidate.id === parsed.data.policyViolationId &&
+            candidate.tenantId === tenant.id &&
+            candidate.status === "approved_for_restriction",
+        );
+
+        if (!violation) {
+          return { error: "approved_violation_required" as const };
+        }
+
+        tenant.status = "restricted";
+        tenant.sendPaused = true;
+
+        data.operationalControls.push({
+          id: db.newId(),
+          scope: "tenant",
+          scopeId: tenant.id,
+          paused: true,
+          reason: parsed.data.reason,
+          setByAdminId: actor.admin.id,
+          createdAt: db.nowIso(),
+        });
+
+        data.auditLogs.push({
+          id: db.newId(),
+          tenantId: tenant.id,
+          actorType: "admin",
+          actorId: actor.admin.id,
+          action: "ops.restrict_tenant",
+          resourceType: "tenant",
+          resourceId: tenant.id,
+          reason: parsed.data.reason,
+          metadata: { policyViolationId: violation.id },
+          createdAt: db.nowIso(),
+        });
+      } else {
+        tenant.status = "active";
+        tenant.sendPaused = false;
+
+        data.operationalControls.push({
+          id: db.newId(),
+          scope: "tenant",
+          scopeId: tenant.id,
+          paused: false,
+          reason: parsed.data.reason,
+          setByAdminId: actor.admin.id,
+          createdAt: db.nowIso(),
+        });
+
+        data.auditLogs.push({
+          id: db.newId(),
+          tenantId: tenant.id,
+          actorType: "admin",
+          actorId: actor.admin.id,
+          action: "ops.unrestrict_tenant",
+          resourceType: "tenant",
+          resourceId: tenant.id,
+          reason: parsed.data.reason,
+          metadata: {},
+          createdAt: db.nowIso(),
+        });
+      }
+
+      return { tenantId: tenant.id, status: tenant.status, sendPaused: tenant.sendPaused };
+    });
+
+    if (result.error === "not_found") {
+      return reply.status(404).send({ error: "Tenant not found" });
+    }
+    if (result.error === "approved_violation_required") {
+      return reply.status(409).send({
+        error: "Manual review required: approved policy violation is needed before restricting tenant",
+      });
+    }
+
+    return reply.send(result);
   });
 
   app.post("/ops/pause-global", async (request, reply) => {

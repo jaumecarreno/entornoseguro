@@ -2,11 +2,15 @@
   CampaignStatus,
   DataClass,
   LifecycleMode,
+  PolicyViolationSeverity,
+  PolicyViolationStatus,
+  PolicyViolationType,
   RecipientEventType,
   RecipientSendStatus,
   Role,
   SendingDomainVerificationStatus,
   SendingMode,
+  TenantStatus,
   TargetDomainVerificationStatus,
 } from "@entornoseguro/shared";
 
@@ -14,7 +18,7 @@ export interface Tenant {
   id: string;
   name: string;
   slug: string;
-  status: "active" | "restricted";
+  status: TenantStatus;
   lifecycleMode: LifecycleMode;
   defaultSendingMode: SendingMode;
   sendPaused: boolean;
@@ -151,6 +155,23 @@ export interface OperationalControl {
   createdAt: string;
 }
 
+export interface PolicyViolation {
+  id: string;
+  tenantId: string;
+  campaignId: string | null;
+  type: PolicyViolationType;
+  severity: PolicyViolationSeverity;
+  status: PolicyViolationStatus;
+  summary: string;
+  threshold: number;
+  observed: number;
+  sampleSize: number;
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewedByAdminId: string | null;
+  reviewNote: string | null;
+}
+
 export interface DatabaseData {
   system: {
     globalSendPaused: boolean;
@@ -168,4 +189,5 @@ export interface DatabaseData {
   processedWebhooks: ProcessedWebhook[];
   auditLogs: AuditLog[];
   operationalControls: OperationalControl[];
+  policyViolations: PolicyViolation[];
 }

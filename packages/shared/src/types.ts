@@ -4,6 +4,8 @@ export type LifecycleMode = "sandbox" | "production";
 
 export type SendingMode = "dedicated" | "customer_domain";
 
+export type TenantStatus = "active" | "restricted";
+
 export type TargetDomainVerificationStatus = "pending" | "demo_verified" | "blocked";
 
 export type SendingDomainVerificationStatus =
@@ -34,6 +36,17 @@ export type RecipientEventType =
   | "training_completed";
 
 export type PauseScope = "global" | "tenant" | "campaign";
+
+export type PolicyViolationType =
+  | "high_credential_submit_rate"
+  | "low_report_rate"
+  | "high_click_rate";
+
+export type PolicyViolationSeverity = "medium" | "high";
+
+export type PolicyViolationStatus = "open" | "approved_for_restriction" | "dismissed";
+
+export type PolicyReviewDecision = "approve_for_restriction" | "dismiss";
 
 export interface PauseState {
   globalPaused: boolean;

@@ -29,6 +29,14 @@ function authHeader(token: string) {
   return { authorization: `Bearer ${token}` };
 }
 
+function buildDemoCsv(count: number): string {
+  const rows = ["email,full_name,department"];
+  for (let i = 0; i < count; i += 1) {
+    rows.push(`employee${i}@demo.local,Employee ${i},Ops`);
+  }
+  return rows.join("\n");
+}
+
 async function createReadyCampaign(token: string): Promise<{ campaignId: string; sendingDomainId: string }> {
   const me = await app.inject({
     method: "GET",
@@ -459,5 +467,159 @@ describe("stage1 api", () => {
     });
     expect(duplicateEvent.statusCode).toBe(200);
     expect(duplicateEvent.json()).toMatchObject({ duplicateEvent: 1 });
+  });
+
+  it("enforces manual review before tenant restriction and keeps event ingestion available", async () => {
+    const signupPayload = await signup();
+
+    const importEmployees = await app.inject({
+      method: "POST",
+      url: "/employees/import-csv",
+      headers: authHeader(signupPayload.token),
+      payload: {
+        csv: buildDemoCsv(10),
+      },
+    });
+    expect(importEmployees.statusCode).toBe(200);
+
+    const { campaignId } = await createReadyCampaign(signupPayload.token);
+
+    const dispatch = await app.inject({
+      method: "POST",
+      url: `/campaigns/${campaignId}/dispatch`,
+      headers: authHeader(signupPayload.token),
+      payload: {},
+    });
+    expect(dispatch.statusCode).toBe(200);
+
+    const recipientsResponse = await app.inject({
+      method: "GET",
+      url: `/campaigns/${campaignId}/recipients`,
+      headers: authHeader(signupPayload.token),
+    });
+    expect(recipientsResponse.statusCode).toBe(200);
+    const recipients = (recipientsResponse.json() as { items: Array<{ trackingToken: string; id: string }> }).items;
+    expect(recipients.length).toBe(10);
+
+    for (const recipient of recipients.slice(0, 4)) {
+      const credential = await app.inject({
+        method: "POST",
+        url: "/events/credential-submit-simulated",
+        payload: {
+          trackingToken: recipient.trackingToken,
+          username: "employee@demo.local",
+          password: "NEVER_STORE",
+        },
+      });
+      expect(credential.statusCode).toBe(200);
+    }
+
+    const evaluate = await app.inject({
+      method: "POST",
+      url: `/campaigns/${campaignId}/evaluate-risk`,
+      headers: authHeader(signupPayload.token),
+      payload: { note: "test evaluation" },
+    });
+    expect(evaluate.statusCode).toBe(200);
+    const evaluateBody = evaluate.json() as {
+      evaluationReady: boolean;
+      matchedViolations: Array<{ id: string; type: string; status: string }>;
+    };
+    expect(evaluateBody.evaluationReady).toBe(true);
+    const highCredentialViolation = evaluateBody.matchedViolations.find(
+      (violation) => violation.type === "high_credential_submit_rate",
+    );
+    expect(highCredentialViolation).toBeDefined();
+
+    const blockedRestriction = await app.inject({
+      method: "POST",
+      url: `/ops/tenants/${signupPayload.tenant.id}/restrict`,
+      headers: authHeader(signupPayload.token),
+      payload: {
+        restricted: true,
+        reason: "manual restriction",
+        policyViolationId: highCredentialViolation!.id,
+      },
+    });
+    expect(blockedRestriction.statusCode).toBe(409);
+
+    const review = await app.inject({
+      method: "POST",
+      url: `/ops/policy-violations/${highCredentialViolation!.id}/review`,
+      headers: authHeader(signupPayload.token),
+      payload: {
+        decision: "approve_for_restriction",
+        note: "approved by reviewer",
+      },
+    });
+    expect(review.statusCode).toBe(200);
+    expect(review.json()).toMatchObject({ status: "approved_for_restriction" });
+
+    const restricted = await app.inject({
+      method: "POST",
+      url: `/ops/tenants/${signupPayload.tenant.id}/restrict`,
+      headers: authHeader(signupPayload.token),
+      payload: {
+        restricted: true,
+        reason: "manual restriction",
+        policyViolationId: highCredentialViolation!.id,
+      },
+    });
+    expect(restricted.statusCode).toBe(200);
+    expect(restricted.json()).toMatchObject({ status: "restricted", sendPaused: true });
+
+    const me = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: authHeader(signupPayload.token),
+    });
+    expect(me.statusCode).toBe(200);
+    const meBody = me.json() as { sendingDomains: Array<{ id: string }> };
+
+    const blockedCampaign = await app.inject({
+      method: "POST",
+      url: "/campaigns",
+      headers: authHeader(signupPayload.token),
+      payload: {
+        name: "Blocked schedule",
+        templateName: "Invoice",
+        sendingMode: "dedicated",
+        sendingDomainId: meBody.sendingDomains[0].id,
+      },
+    });
+    expect(blockedCampaign.statusCode).toBe(201);
+    const blockedCampaignId = (blockedCampaign.json() as { id: string }).id;
+
+    const previewBlocked = await app.inject({
+      method: "POST",
+      url: `/campaigns/${blockedCampaignId}/preview`,
+      headers: authHeader(signupPayload.token),
+    });
+    expect(previewBlocked.statusCode).toBe(200);
+
+    const scheduleBlocked = await app.inject({
+      method: "POST",
+      url: `/campaigns/${blockedCampaignId}/schedule`,
+      headers: authHeader(signupPayload.token),
+      payload: { scheduledAt: new Date().toISOString() },
+    });
+    expect(scheduleBlocked.statusCode).toBe(423);
+
+    const ingestionStillWorks = await app.inject({
+      method: "POST",
+      url: "/events/report-phish",
+      payload: { trackingToken: recipients[0].trackingToken },
+    });
+    expect(ingestionStillWorks.statusCode).toBe(200);
+
+    const overview = await app.inject({
+      method: "GET",
+      url: "/risk/overview",
+      headers: authHeader(signupPayload.token),
+    });
+    expect(overview.statusCode).toBe(200);
+    expect(overview.json()).toMatchObject({
+      unresolvedViolations: { highSeverity: 1 },
+    });
   });
 });

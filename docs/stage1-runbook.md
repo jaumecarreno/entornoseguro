@@ -1,4 +1,4 @@
-# Stage 2 Runbook (Dispatch + Tracking + Training)
+# Stage 3 Runbook (Risk + Manual Enforcement)
 
 ## Happy Path Demo
 
@@ -13,7 +13,7 @@
 9. Track behavior using event endpoints or provider webhooks.
 10. Start and complete training, then review employee timeline/history.
 
-## Stage 2 Endpoints
+## Stage 2 Core Endpoints
 
 - Dispatch recipients: `POST /campaigns/:id/dispatch`
 - Campaign recipients: `GET /campaigns/:id/recipients`
@@ -25,6 +25,14 @@
 - Training complete: `POST /training/:sessionId/complete`
 - Employee timeline: `GET /employees/:id/timeline?scope=all`
 - Employee history: `GET /employees/:id/history`
+
+## Stage 3 Endpoints
+
+- Risk overview (explainable): `GET /risk/overview`
+- Evaluate campaign risk: `POST /campaigns/:id/evaluate-risk`
+- List policy violations: `GET /ops/policy-violations`
+- Review policy violation: `POST /ops/policy-violations/:id/review`
+- Restrict/unrestrict tenant (manual): `POST /ops/tenants/:id/restrict`
 
 ## Pause Controls
 
@@ -38,7 +46,7 @@ Precedence check for schedule/dispatch:
 2. `tenant`
 3. `campaign`
 
-## Security/Anti-abuse in Stage 2
+## Security/Anti-abuse in Stage 3
 
 - One target domain per tenant (MVP freeze)
 - Separate target/sending domain model
@@ -47,10 +55,12 @@ Precedence check for schedule/dispatch:
 - Webhook idempotency via processed event ids
 - Event deduplication at recipient-event level
 - Credential submit simulation stores only safe metadata (`username`, `hasPasswordInput`)
+- Conservative policy thresholds and non-automatic enforcement
+- Manual review required before tenant restriction
 
-## Known Stage 2 Limits
+## Known Stage 3 Limits
 
 - Email provider defaults to mock adapter (`EMAIL_PROVIDER_KIND=mock`)
 - Customer domain DNS verification is still stubbed
 - JSON storage is suitable for pilot/demo, not production scale
-- Automated abuse enforcement hardening remains Stage 3
+- Restriction is manual only (no automatic suspension engine)

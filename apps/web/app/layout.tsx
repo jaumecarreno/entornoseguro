@@ -2,8 +2,8 @@
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "EntornoSeguro Stage 1 Demo",
-  description: "Signup -> setup -> import -> campaign preview + training preview + timeline mock",
+  title: "EntornoSeguro Stage 3 Demo",
+  description: "Signup -> setup -> import -> preview -> dispatch -> training -> timeline -> risk review",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

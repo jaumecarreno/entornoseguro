@@ -20,6 +20,7 @@ const defaultData: DatabaseData = {
   processedWebhooks: [],
   auditLogs: [],
   operationalControls: [],
+  policyViolations: [],
 };
 
 function normalizeParsedData(parsed: Partial<DatabaseData> | null | undefined): DatabaseData {
@@ -40,6 +41,7 @@ function normalizeParsedData(parsed: Partial<DatabaseData> | null | undefined): 
     processedWebhooks: parsed?.processedWebhooks ?? [],
     auditLogs: parsed?.auditLogs ?? [],
     operationalControls: parsed?.operationalControls ?? [],
+    policyViolations: parsed?.policyViolations ?? [],
   };
 }
 

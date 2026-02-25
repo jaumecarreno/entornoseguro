@@ -1,6 +1,6 @@
 ﻿import { expect, test } from "@playwright/test";
 
-test("stage2 demo flow is visible end-to-end with dispatch and training", async ({ page }) => {
+test("stage3 demo flow is visible end-to-end with dispatch, training, and risk overview", async ({ page }) => {
   const stamp = Date.now();
   const company = `Acme ${stamp}`;
   const ownerEmail = `owner${stamp}@acme.test`;
@@ -38,4 +38,8 @@ test("stage2 demo flow is visible end-to-end with dispatch and training", async 
 
   await page.getByRole("button", { name: "Load timeline" }).click();
   await expect(page.getByRole("heading", { name: "6) Timeline" })).toBeVisible();
+
+  await expect(page.getByRole("heading", { name: "7) Stage 3: risk + manual enforcement" })).toBeVisible();
+  await page.getByRole("button", { name: "Load risk overview" }).click();
+  await expect(page.getByText("Score:", { exact: false })).toBeVisible();
 });
