@@ -26,7 +26,7 @@ test("stage1 demo flow is visible end-to-end without real sending", async ({ pag
 
   await page.getByRole("button", { name: "Create campaign draft" }).click();
   await page.getByRole("button", { name: "Preview campaign + training" }).click();
-  await expect(page.getByRole("heading", { name: "Training preview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Training preview", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Microquiz preview" })).toBeVisible();
 
   await page.getByRole("button", { name: "Load timeline demo" }).click();
