@@ -13,9 +13,35 @@ const defaultData: DatabaseData = {
   sendingDomains: [],
   employees: [],
   campaigns: [],
+  campaignRecipients: [],
+  recipientEvents: [],
+  trainingSessions: [],
+  quizAttempts: [],
+  processedWebhooks: [],
   auditLogs: [],
   operationalControls: [],
 };
+
+function normalizeParsedData(parsed: Partial<DatabaseData> | null | undefined): DatabaseData {
+  return {
+    system: {
+      globalSendPaused: parsed?.system?.globalSendPaused ?? false,
+    },
+    tenants: parsed?.tenants ?? [],
+    adminUsers: parsed?.adminUsers ?? [],
+    targetDomains: parsed?.targetDomains ?? [],
+    sendingDomains: parsed?.sendingDomains ?? [],
+    employees: parsed?.employees ?? [],
+    campaigns: parsed?.campaigns ?? [],
+    campaignRecipients: parsed?.campaignRecipients ?? [],
+    recipientEvents: parsed?.recipientEvents ?? [],
+    trainingSessions: parsed?.trainingSessions ?? [],
+    quizAttempts: parsed?.quizAttempts ?? [],
+    processedWebhooks: parsed?.processedWebhooks ?? [],
+    auditLogs: parsed?.auditLogs ?? [],
+    operationalControls: parsed?.operationalControls ?? [],
+  };
+}
 
 export class JsonDatabase {
   private readonly filePath: string;
@@ -35,7 +61,9 @@ export class JsonDatabase {
 
     try {
       const content = await fs.readFile(this.filePath, "utf8");
-      this.data = JSON.parse(content) as DatabaseData;
+      const parsed = JSON.parse(content) as Partial<DatabaseData>;
+      this.data = normalizeParsedData(parsed);
+      await this.flush();
     } catch {
       this.data = structuredClone(defaultData);
       await this.flush();
@@ -49,9 +77,9 @@ export class JsonDatabase {
     return reader(structuredClone(this.data));
   }
 
-  async write<T>(writer: (data: DatabaseData) => T): Promise<T> {
+  async write<T>(writer: (data: DatabaseData) => T | Promise<T>): Promise<T> {
     await this.init();
-    const result = writer(this.data);
+    const result = await writer(this.data);
     await this.flush();
     return result;
   }

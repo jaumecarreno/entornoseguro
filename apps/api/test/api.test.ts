@@ -29,6 +29,46 @@ function authHeader(token: string) {
   return { authorization: `Bearer ${token}` };
 }
 
+async function createReadyCampaign(token: string): Promise<{ campaignId: string; sendingDomainId: string }> {
+  const me = await app.inject({
+    method: "GET",
+    url: "/me",
+    headers: authHeader(token),
+  });
+  const meBody = me.json() as { sendingDomains: Array<{ id: string }> };
+
+  const campaign = await app.inject({
+    method: "POST",
+    url: "/campaigns",
+    headers: authHeader(token),
+    payload: {
+      name: "Q1 Simulation",
+      templateName: "Urgent Invoice",
+      sendingMode: "dedicated",
+      sendingDomainId: meBody.sendingDomains[0].id,
+    },
+  });
+  expect(campaign.statusCode).toBe(201);
+  const campaignBody = campaign.json() as { id: string };
+
+  const preview = await app.inject({
+    method: "POST",
+    url: `/campaigns/${campaignBody.id}/preview`,
+    headers: authHeader(token),
+  });
+  expect(preview.statusCode).toBe(200);
+
+  const schedule = await app.inject({
+    method: "POST",
+    url: `/campaigns/${campaignBody.id}/schedule`,
+    headers: authHeader(token),
+    payload: { scheduledAt: new Date().toISOString() },
+  });
+  expect(schedule.statusCode).toBe(200);
+
+  return { campaignId: campaignBody.id, sendingDomainId: meBody.sendingDomains[0].id };
+}
+
 describe("stage1 api", () => {
   beforeEach(async () => {
     const dbFilePath = path.join(os.tmpdir(), `entornoseguro-${randomUUID()}.json`);
@@ -239,5 +279,185 @@ describe("stage1 api", () => {
     });
 
     expect(scheduled.statusCode).toBe(200);
+  });
+
+  it("dispatches campaign, records training flow, and never persists password", async () => {
+    const signupPayload = await signup();
+
+    await app.inject({
+      method: "POST",
+      url: "/employees/import-csv",
+      headers: authHeader(signupPayload.token),
+      payload: {
+        csv: "email,full_name,department\nalice@demo.local,Alice Demo,Finance",
+      },
+    });
+
+    const { campaignId } = await createReadyCampaign(signupPayload.token);
+
+    const dispatch = await app.inject({
+      method: "POST",
+      url: `/campaigns/${campaignId}/dispatch`,
+      headers: authHeader(signupPayload.token),
+      payload: {},
+    });
+    expect(dispatch.statusCode).toBe(200);
+
+    const recipients = await app.inject({
+      method: "GET",
+      url: `/campaigns/${campaignId}/recipients`,
+      headers: authHeader(signupPayload.token),
+    });
+    expect(recipients.statusCode).toBe(200);
+    const recipientsBody = recipients.json() as {
+      items: Array<{ trackingToken: string; employeeId: string; providerMessageId: string | null }>;
+    };
+    expect(recipientsBody.items.length).toBeGreaterThan(0);
+
+    const trackingToken = recipientsBody.items[0].trackingToken;
+
+    const click = await app.inject({
+      method: "POST",
+      url: "/events/click",
+      payload: { trackingToken },
+    });
+    expect(click.statusCode).toBe(200);
+
+    const credential = await app.inject({
+      method: "POST",
+      url: "/events/credential-submit-simulated",
+      headers: authHeader(signupPayload.token),
+      payload: {
+        trackingToken,
+        username: "alice@demo.local",
+        password: "TOP_SECRET_DO_NOT_STORE",
+      },
+    });
+    expect(credential.statusCode).toBe(200);
+    const credentialBody = credential.json() as { storedMetadata: Record<string, unknown> };
+    expect(credentialBody.storedMetadata).toMatchObject({
+      username: "alice@demo.local",
+      hasPasswordInput: true,
+    });
+    expect(credentialBody.storedMetadata).not.toHaveProperty("password");
+
+    const startTraining = await app.inject({
+      method: "POST",
+      url: "/training/start",
+      payload: { trackingToken },
+    });
+    expect(startTraining.statusCode).toBe(200);
+    const startBody = startTraining.json() as { sessionId: string };
+
+    const completeTraining = await app.inject({
+      method: "POST",
+      url: `/training/${startBody.sessionId}/complete`,
+      payload: { answers: [0, 1] },
+    });
+    expect(completeTraining.statusCode).toBe(200);
+
+    const report = await app.inject({
+      method: "POST",
+      url: "/events/report-phish",
+      payload: { trackingToken },
+    });
+    expect(report.statusCode).toBe(200);
+
+    const timeline = await app.inject({
+      method: "GET",
+      url: `/employees/${recipientsBody.items[0].employeeId}/timeline?scope=all`,
+      headers: authHeader(signupPayload.token),
+    });
+    expect(timeline.statusCode).toBe(200);
+    const timelineBody = timeline.json() as { events: Array<{ type: string }> };
+
+    const types = timelineBody.events.map((event) => event.type);
+    expect(types).toContain("click");
+    expect(types).toContain("credential_submit_simulated");
+    expect(types).toContain("training_completed");
+    expect(types).toContain("reported");
+  });
+
+  it("handles webhook idempotency and event deduplication", async () => {
+    const signupPayload = await signup();
+
+    await app.inject({
+      method: "POST",
+      url: "/employees/import-csv",
+      headers: authHeader(signupPayload.token),
+      payload: {
+        csv: "email,full_name,department\nalice@demo.local,Alice Demo,Finance",
+      },
+    });
+
+    const { campaignId } = await createReadyCampaign(signupPayload.token);
+    await app.inject({
+      method: "POST",
+      url: `/campaigns/${campaignId}/dispatch`,
+      headers: authHeader(signupPayload.token),
+      payload: {},
+    });
+
+    const recipients = await app.inject({
+      method: "GET",
+      url: `/campaigns/${campaignId}/recipients`,
+      headers: authHeader(signupPayload.token),
+    });
+    const recipient = (recipients.json() as { items: Array<{ providerMessageId: string | null }> }).items[0];
+    expect(recipient.providerMessageId).toBeTruthy();
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/webhooks/email-provider",
+      payload: {
+        events: [
+          {
+            provider: "mock",
+            eventId: "event-1",
+            messageId: recipient.providerMessageId,
+            eventType: "delivered",
+            occurredAt: new Date().toISOString(),
+          },
+        ],
+      },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ processed: 1, createdEvents: 1 });
+
+    const duplicateWebhook = await app.inject({
+      method: "POST",
+      url: "/webhooks/email-provider",
+      payload: {
+        events: [
+          {
+            provider: "mock",
+            eventId: "event-1",
+            messageId: recipient.providerMessageId,
+            eventType: "delivered",
+            occurredAt: new Date().toISOString(),
+          },
+        ],
+      },
+    });
+    expect(duplicateWebhook.statusCode).toBe(200);
+    expect(duplicateWebhook.json()).toMatchObject({ duplicateWebhook: 1 });
+
+    const duplicateEvent = await app.inject({
+      method: "POST",
+      url: "/webhooks/email-provider",
+      payload: {
+        events: [
+          {
+            provider: "mock",
+            eventId: "event-2",
+            messageId: recipient.providerMessageId,
+            eventType: "delivered",
+            occurredAt: new Date().toISOString(),
+          },
+        ],
+      },
+    });
+    expect(duplicateEvent.statusCode).toBe(200);
+    expect(duplicateEvent.json()).toMatchObject({ duplicateEvent: 1 });
   });
 });

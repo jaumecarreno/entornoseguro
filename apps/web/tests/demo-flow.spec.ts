@@ -1,6 +1,6 @@
 ﻿import { expect, test } from "@playwright/test";
 
-test("stage1 demo flow is visible end-to-end without real sending", async ({ page }) => {
+test("stage2 demo flow is visible end-to-end with dispatch and training", async ({ page }) => {
   const stamp = Date.now();
   const company = `Acme ${stamp}`;
   const ownerEmail = `owner${stamp}@acme.test`;
@@ -27,9 +27,15 @@ test("stage1 demo flow is visible end-to-end without real sending", async ({ pag
   await page.getByRole("button", { name: "Create campaign draft" }).click();
   await page.getByRole("button", { name: "Preview campaign + training" }).click();
   await expect(page.getByRole("heading", { name: "Training preview", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Microquiz preview" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Load timeline demo" }).click();
-  await expect(page.getByText("Timeline demo-only cargado.")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "5) Timeline mock demo-only" })).toBeVisible();
+  await page.getByRole("button", { name: "Schedule" }).click();
+  await page.getByRole("button", { name: "Dispatch (Stage 2)" }).click();
+  await expect(page.getByText("Dispatch completado", { exact: false })).toBeVisible();
+
+  await page.getByRole("button", { name: "Simulate click" }).click();
+  await page.getByRole("button", { name: "Start training" }).click();
+  await page.getByRole("button", { name: "Complete training" }).click();
+
+  await page.getByRole("button", { name: "Load timeline" }).click();
+  await expect(page.getByRole("heading", { name: "6) Timeline" })).toBeVisible();
 });

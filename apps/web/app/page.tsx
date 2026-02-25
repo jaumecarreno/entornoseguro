@@ -40,11 +40,26 @@ type Employee = {
 type Campaign = {
   id: string;
   name: string;
-  status: "draft" | "previewed" | "scheduled" | "paused";
+  status: "draft" | "previewed" | "scheduled" | "sending" | "completed" | "paused";
   sendingMode: SendingMode;
   sendingDomainId: string;
   dataScope: "demo_only" | "real";
   scheduledAt: string | null;
+  recipientStats?: {
+    total: number;
+    sent: number;
+    failed: number;
+  };
+};
+
+type CampaignRecipient = {
+  id: string;
+  email: string;
+  fullName: string;
+  trackingToken: string;
+  sendStatus: "pending" | "sent" | "failed";
+  providerMessageId: string | null;
+  dataClass: "demo_only" | "real";
 };
 
 type TimelinePayload = {
@@ -53,6 +68,13 @@ type TimelinePayload = {
 };
 
 const defaultCsv = `email,full_name,department\nalice@demo.local,Alice Ruiz,Finance\nbob@demo.local,Bob Vidal,Sales`;
+
+function makeEventId(prefix: string): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}`;
+}
 
 export default function HomePage() {
   const [token, setToken] = useState<string | null>(null);
@@ -73,6 +95,19 @@ export default function HomePage() {
 
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>("");
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>("");
+  const [recipients, setRecipients] = useState<CampaignRecipient[]>([]);
+  const [selectedRecipientId, setSelectedRecipientId] = useState<string>("");
+  const [credentialUsername, setCredentialUsername] = useState("employee@demo.local");
+  const [credentialPassword, setCredentialPassword] = useState("SuperSecret123");
+  const [activeTrainingSessionId, setActiveTrainingSessionId] = useState<string>("");
+  const [trainingResult, setTrainingResult] = useState<null | { score: number; passed: boolean }>(null);
+  const [webhookSummary, setWebhookSummary] = useState<null | {
+    processed: number;
+    duplicateWebhook: number;
+    duplicateEvent: number;
+    unknownMessage: number;
+    createdEvents: number;
+  }>(null);
   const [timeline, setTimeline] = useState<TimelinePayload | null>(null);
   const [trainingPreview, setTrainingPreview] = useState<
     | null
@@ -92,6 +127,7 @@ export default function HomePage() {
   const [campaignPauseReason, setCampaignPauseReason] = useState("Campaign pause");
 
   const currentCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null;
+  const selectedRecipient = recipients.find((recipient) => recipient.id === selectedRecipientId) ?? null;
 
   const sendingDomainOptions = useMemo(() => {
     if (!me) {
@@ -147,6 +183,26 @@ export default function HomePage() {
     }
   }
 
+  async function loadRecipients(sessionToken: string, campaignId: string): Promise<void> {
+    if (!campaignId) {
+      setRecipients([]);
+      setSelectedRecipientId("");
+      return;
+    }
+
+    const response = await apiFetch<{ items: CampaignRecipient[] }>(`/campaigns/${campaignId}/recipients`, {}, sessionToken);
+    setRecipients(response.items);
+
+    if (response.items.length === 0) {
+      setSelectedRecipientId("");
+      return;
+    }
+
+    if (!response.items.some((item) => item.id === selectedRecipientId)) {
+      setSelectedRecipientId(response.items[0].id);
+    }
+  }
+
   useEffect(() => {
     const existing = readToken();
     if (!existing) {
@@ -169,6 +225,16 @@ export default function HomePage() {
       setSelectedSendingDomainId(sendingDomainOptions[0].id);
     }
   }, [sendingDomainOptions, selectedSendingDomainId]);
+
+  useEffect(() => {
+    if (!token || !selectedCampaignId) {
+      return;
+    }
+
+    loadRecipients(token, selectedCampaignId).catch((error) => {
+      setError(String(error instanceof Error ? error.message : error));
+    });
+  }, [token, selectedCampaignId]);
 
   async function handleSignup(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -331,6 +397,7 @@ export default function HomePage() {
       );
       await refreshAll(token);
       setSelectedCampaignId(campaign.id);
+      await loadRecipients(token, campaign.id);
       setSuccess("Campaign creada en estado draft.");
     } catch (error) {
       setError(String(error instanceof Error ? error.message : error));
@@ -380,7 +447,183 @@ export default function HomePage() {
         }),
       }, token);
       await refreshAll(token);
-      setSuccess("Campaign programada sin envío real (Etapa 1). ");
+      setSuccess("Campaign programada.");
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleDispatchCampaign(): Promise<void> {
+    if (!token || !selectedCampaignId) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const response = await apiFetch<{ attempted: number; sent: number; failed: number }>(
+        `/campaigns/${selectedCampaignId}/dispatch`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+        token,
+      );
+      await refreshAll(token);
+      await loadRecipients(token, selectedCampaignId);
+      setSuccess(`Dispatch completado. attempted=${response.attempted}, sent=${response.sent}, failed=${response.failed}`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleSimulateClick(): Promise<void> {
+    if (!token || !selectedRecipient) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const result = await apiFetch<{ trainingSessionId: string }>(
+        "/events/click",
+        {
+          method: "POST",
+          body: JSON.stringify({ trackingToken: selectedRecipient.trackingToken }),
+        },
+        token,
+      );
+      setActiveTrainingSessionId(result.trainingSessionId);
+      setSuccess("Evento click registrado y training iniciado.");
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleSimulateReport(): Promise<void> {
+    if (!token || !selectedRecipient) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      await apiFetch(
+        "/events/report-phish",
+        {
+          method: "POST",
+          body: JSON.stringify({ trackingToken: selectedRecipient.trackingToken }),
+        },
+        token,
+      );
+      setSuccess("Evento reportado registrado.");
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleSimulateCredentialSubmit(): Promise<void> {
+    if (!token || !selectedRecipient) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const result = await apiFetch<{ storedMetadata: Record<string, unknown> }>(
+        "/events/credential-submit-simulated",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            trackingToken: selectedRecipient.trackingToken,
+            username: credentialUsername,
+            password: credentialPassword,
+          }),
+        },
+        token,
+      );
+      setCredentialPassword("");
+      setSuccess(`Credential submit simulado guardado sin password. ${JSON.stringify(result.storedMetadata)}`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleTrainingStart(): Promise<void> {
+    if (!token || !selectedRecipient) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const response = await apiFetch<{
+        sessionId: string;
+        module: { title: string; summary: string; points: string[] };
+        quiz: Array<{ id: string; question: string; options: string[] }>;
+      }>(
+        "/training/start",
+        {
+          method: "POST",
+          body: JSON.stringify({ trackingToken: selectedRecipient.trackingToken }),
+        },
+        token,
+      );
+      setActiveTrainingSessionId(response.sessionId);
+      setTrainingPreview({ module: response.module, quiz: response.quiz, badge: "stage2-live" });
+      setSuccess(`Training iniciado: ${response.sessionId}`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleTrainingComplete(): Promise<void> {
+    if (!token || !activeTrainingSessionId) {
+      return;
+    }
+    clearNotices();
+
+    try {
+      const response = await apiFetch<{ score: number; passed: boolean }>(
+        `/training/${activeTrainingSessionId}/complete`,
+        {
+          method: "POST",
+          body: JSON.stringify({ answers: [0, 1] }),
+        },
+        token,
+      );
+      setTrainingResult(response);
+      setSuccess(`Training completado. score=${response.score} passed=${response.passed}`);
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    }
+  }
+
+  async function handleWebhook(eventType: "delivered" | "open" | "click"): Promise<void> {
+    if (!selectedRecipient?.providerMessageId) {
+      setError("Selecciona un recipient con providerMessageId.");
+      return;
+    }
+    clearNotices();
+
+    try {
+      const response = await apiFetch<{
+        processed: number;
+        duplicateWebhook: number;
+        duplicateEvent: number;
+        unknownMessage: number;
+        createdEvents: number;
+      }>("/webhooks/email-provider", {
+        method: "POST",
+        body: JSON.stringify({
+          events: [
+            {
+              provider: "mock",
+              eventId: makeEventId(`mock-${eventType}`),
+              messageId: selectedRecipient.providerMessageId,
+              eventType,
+              occurredAt: new Date().toISOString(),
+            },
+          ],
+        }),
+      });
+      setWebhookSummary(response);
+      setSuccess(`Webhook ${eventType} procesado.`);
     } catch (error) {
       setError(String(error instanceof Error ? error.message : error));
     }
@@ -393,9 +636,9 @@ export default function HomePage() {
     clearNotices();
 
     try {
-      const payload = await apiFetch<TimelinePayload>(`/employees/${selectedEmployeeId}/timeline?scope=demo`, {}, token);
+      const payload = await apiFetch<TimelinePayload>(`/employees/${selectedEmployeeId}/timeline?scope=all`, {}, token);
       setTimeline(payload);
-      setSuccess("Timeline demo-only cargado.");
+      setSuccess("Timeline cargado.");
     } catch (error) {
       setError(String(error instanceof Error ? error.message : error));
     }
@@ -470,9 +713,9 @@ export default function HomePage() {
   return (
     <main>
       <div className="card">
-        <h1>EntornoSeguro - Stage 1 Demo</h1>
+        <h1>EntornoSeguro - Stage 2 Demo</h1>
         <p className="muted">
-          Flujo visible: signup - setup domains - import CSV - campaign preview - training preview - timeline mock.
+          Flujo visible: signup - setup domains - import CSV - campaign preview - schedule - dispatch - events - training - timeline.
         </p>
         <div className="inline">
           <span className="badge">demo-only</span>
@@ -661,7 +904,10 @@ export default function HomePage() {
                 Preview campaign + training
               </button>
               <button type="button" className="secondary" onClick={handleScheduleCampaign} disabled={!selectedCampaignId}>
-                Schedule (no send)
+                Schedule
+              </button>
+              <button type="button" className="secondary" onClick={handleDispatchCampaign} disabled={!selectedCampaignId}>
+                Dispatch (Stage 2)
               </button>
             </div>
 
@@ -703,13 +949,114 @@ export default function HomePage() {
 
             {currentCampaign ? (
               <p className="muted">
-                Campaign actual: {currentCampaign.status} / data scope: {currentCampaign.dataScope}
+                Campaign actual: {currentCampaign.status} / data scope: {currentCampaign.dataScope} / sent: {currentCampaign.recipientStats?.sent ?? 0}
               </p>
             ) : null}
           </section>
 
           <section className="card">
-            <h2>5) Timeline mock demo-only</h2>
+            <h2>5) Stage 2: recipients, events y training real</h2>
+            <label htmlFor="recipient-select">Recipient</label>
+            <select
+              id="recipient-select"
+              value={selectedRecipientId}
+              onChange={(event) => setSelectedRecipientId(event.target.value)}
+            >
+              <option value="">Select...</option>
+              {recipients.map((recipient) => (
+                <option key={recipient.id} value={recipient.id}>
+                  {recipient.email} ({recipient.sendStatus})
+                </option>
+              ))}
+            </select>
+
+            {selectedRecipient ? (
+              <>
+                <p className="muted">trackingToken: {selectedRecipient.trackingToken}</p>
+                <p className="muted">providerMessageId: {selectedRecipient.providerMessageId ?? "-"}</p>
+              </>
+            ) : null}
+
+            <div className="inline">
+              <button type="button" className="secondary" onClick={handleSimulateClick} disabled={!selectedRecipient}>
+                Simulate click
+              </button>
+              <button type="button" className="secondary" onClick={handleSimulateReport} disabled={!selectedRecipient}>
+                Simulate report
+              </button>
+            </div>
+
+            <div>
+              <label htmlFor="credential-username">Credential username</label>
+              <input
+                id="credential-username"
+                value={credentialUsername}
+                onChange={(event) => setCredentialUsername(event.target.value)}
+              />
+              <label htmlFor="credential-password">Credential password (never persisted)</label>
+              <input
+                id="credential-password"
+                value={credentialPassword}
+                onChange={(event) => setCredentialPassword(event.target.value)}
+              />
+              <button type="button" className="secondary" onClick={handleSimulateCredentialSubmit} disabled={!selectedRecipient}>
+                Simulate credential submit
+              </button>
+            </div>
+
+            <div className="inline">
+              <button type="button" className="secondary" onClick={handleTrainingStart} disabled={!selectedRecipient}>
+                Start training
+              </button>
+              <button type="button" className="secondary" onClick={handleTrainingComplete} disabled={!activeTrainingSessionId}>
+                Complete training
+              </button>
+            </div>
+
+            {activeTrainingSessionId ? <p className="muted">Training session: {activeTrainingSessionId}</p> : null}
+            {trainingResult ? (
+              <p className="muted">
+                Result: score {trainingResult.score} / passed {String(trainingResult.passed)}
+              </p>
+            ) : null}
+
+            <h3>Webhook mock (idempotente)</h3>
+            <div className="inline">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => handleWebhook("delivered")}
+                disabled={!selectedRecipient?.providerMessageId}
+              >
+                webhook delivered
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => handleWebhook("open")}
+                disabled={!selectedRecipient?.providerMessageId}
+              >
+                webhook open
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => handleWebhook("click")}
+                disabled={!selectedRecipient?.providerMessageId}
+              >
+                webhook click
+              </button>
+            </div>
+
+            {webhookSummary ? (
+              <p className="muted">
+                processed={webhookSummary.processed}, duplicateWebhook={webhookSummary.duplicateWebhook}, duplicateEvent={webhookSummary.duplicateEvent}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="card">
+            <h2>6) Timeline</h2>
             <label htmlFor="employee-select">Employee</label>
             <select
               id="employee-select"
@@ -724,7 +1071,7 @@ export default function HomePage() {
               ))}
             </select>
             <button type="button" className="secondary" onClick={handleLoadTimeline} disabled={!selectedEmployeeId}>
-              Load timeline demo
+              Load timeline
             </button>
 
             {timeline ? (
@@ -744,7 +1091,7 @@ export default function HomePage() {
           </section>
 
           <section className="card">
-            <h2>6) Pause controls (global {">"} tenant {">"} campaign)</h2>
+            <h2>7) Pause controls (global {">"} tenant {">"} campaign)</h2>
             <p className="muted">
               Bloquean nuevos envíos/programaciones; no bloquean ingestión de eventos.
             </p>
@@ -808,7 +1155,7 @@ export default function HomePage() {
           </section>
 
           <section className="card">
-            <h2>7) Audit log (critical actions)</h2>
+            <h2>8) Audit log (critical actions)</h2>
             <ul className="list">
               {auditItems.slice(0, 12).map((item, index) => (
                 <li key={`${item.action}-${index}`}>

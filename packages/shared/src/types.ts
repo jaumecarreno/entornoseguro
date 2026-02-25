@@ -12,9 +12,26 @@ export type SendingDomainVerificationStatus =
   | "stub_verified"
   | "blocked";
 
-export type CampaignStatus = "draft" | "previewed" | "scheduled" | "paused";
+export type CampaignStatus =
+  | "draft"
+  | "previewed"
+  | "scheduled"
+  | "sending"
+  | "completed"
+  | "paused";
 
 export type DataClass = "demo_only" | "real";
+
+export type RecipientSendStatus = "pending" | "sent" | "failed";
+
+export type RecipientEventType =
+  | "delivered"
+  | "open"
+  | "click"
+  | "credential_submit_simulated"
+  | "reported"
+  | "training_started"
+  | "training_completed";
 
 export type PauseScope = "global" | "tenant" | "campaign";
 

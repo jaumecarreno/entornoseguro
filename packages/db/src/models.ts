@@ -2,6 +2,8 @@
   CampaignStatus,
   DataClass,
   LifecycleMode,
+  RecipientEventType,
+  RecipientSendStatus,
   Role,
   SendingDomainVerificationStatus,
   SendingMode,
@@ -72,6 +74,60 @@ export interface Campaign {
   createdAt: string;
 }
 
+export interface CampaignRecipient {
+  id: string;
+  tenantId: string;
+  campaignId: string;
+  employeeId: string;
+  email: string;
+  fullName: string;
+  trackingToken: string;
+  sendStatus: RecipientSendStatus;
+  providerMessageId: string | null;
+  sentAt: string | null;
+  dataClass: DataClass;
+  createdAt: string;
+}
+
+export interface RecipientEvent {
+  id: string;
+  tenantId: string;
+  campaignRecipientId: string;
+  eventType: RecipientEventType;
+  dedupeKey: string;
+  dataClass: DataClass;
+  metadata: Record<string, unknown>;
+  occurredAt: string;
+  createdAt: string;
+}
+
+export interface TrainingSession {
+  id: string;
+  tenantId: string;
+  campaignRecipientId: string;
+  startedAt: string;
+  completedAt: string | null;
+  dataClass: DataClass;
+}
+
+export interface QuizAttempt {
+  id: string;
+  tenantId: string;
+  trainingSessionId: string;
+  score: number;
+  passed: boolean;
+  answers: number[];
+  createdAt: string;
+}
+
+export interface ProcessedWebhook {
+  id: string;
+  provider: string;
+  eventId: string;
+  messageId: string;
+  processedAt: string;
+}
+
 export interface AuditLog {
   id: string;
   tenantId: string | null;
@@ -105,6 +161,11 @@ export interface DatabaseData {
   sendingDomains: SendingDomain[];
   employees: Employee[];
   campaigns: Campaign[];
+  campaignRecipients: CampaignRecipient[];
+  recipientEvents: RecipientEvent[];
+  trainingSessions: TrainingSession[];
+  quizAttempts: QuizAttempt[];
+  processedWebhooks: ProcessedWebhook[];
   auditLogs: AuditLog[];
   operationalControls: OperationalControl[];
 }

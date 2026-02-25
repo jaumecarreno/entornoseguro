@@ -52,5 +52,41 @@ export const pauseSchema = z.object({
 });
 
 export const timelineScopeSchema = z.object({
-  scope: z.enum(["demo"]).default("demo"),
+  scope: z.enum(["demo", "real", "all"]).default("all"),
+});
+
+export const dispatchCampaignSchema = z.object({
+  force: z.boolean().default(false),
+});
+
+export const providerWebhookSchema = z.object({
+  provider: z.string().min(2).default("mock"),
+  eventId: z.string().min(2),
+  messageId: z.string().min(2),
+  eventType: z.enum(["delivered", "open", "click"]),
+  occurredAt: z.string().datetime().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+export const providerWebhookBatchSchema = z.object({
+  events: z.array(providerWebhookSchema).min(1),
+});
+
+export const trackingTokenEventSchema = z.object({
+  trackingToken: z.string().min(10),
+});
+
+export const credentialSubmitSchema = z.object({
+  trackingToken: z.string().min(10),
+  username: z.string().min(1).max(250).optional(),
+  password: z.string().min(1).max(500).optional(),
+});
+
+export const trainingStartSchema = z.object({
+  trackingToken: z.string().min(10),
+});
+
+export const trainingCompleteSchema = z.object({
+  answers: z.array(z.number().int().nonnegative()).default([]),
+  score: z.number().min(0).max(100).optional(),
 });
