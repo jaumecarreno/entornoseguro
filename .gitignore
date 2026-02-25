@@ -1,0 +1,12 @@
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.next/
+**/.next/
+coverage/
+**/coverage/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/api/data/
+*.log

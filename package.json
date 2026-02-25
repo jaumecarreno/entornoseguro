@@ -1,0 +1,21 @@
+{
+  "name": "entornoseguro",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run --workspaces build",
+    "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace @entornoseguro/api run dev",
+    "dev:web": "npm --workspace @entornoseguro/web run dev",
+    "test": "npm run --workspaces test",
+    "lint": "npm run --workspaces lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}
