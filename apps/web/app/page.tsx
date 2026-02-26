@@ -109,6 +109,35 @@ function makeEventId(prefix: string): string {
   return `${prefix}-${Date.now()}`;
 }
 
+function formatPercent(rate: number): string {
+  return `${Math.round(rate * 100)}%`;
+}
+
+function formatTimeAgo(iso: string): string {
+  const timestamp = new Date(iso).getTime();
+  if (Number.isNaN(timestamp)) {
+    return "recently";
+  }
+
+  const diff = Date.now() - timestamp;
+  if (diff < 60_000) {
+    return "just now";
+  }
+
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
 export default function HomePage() {
   const [token, setToken] = useState<string | null>(null);
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -854,16 +883,113 @@ export default function HomePage() {
     }
   }
 
+  const activeSimulations = campaigns.filter((campaign) =>
+    campaign.status === "scheduled" || campaign.status === "sending",
+  ).length;
+  const completedSimulations = campaigns.filter((campaign) => campaign.status === "completed").length;
+  const threatScore = riskOverview?.score ?? (me?.tenant.status === "restricted" ? 78 : 34);
+  const threatLabel =
+    threatScore >= 70 ? "High" : threatScore >= 40 ? "Moderate" : "Low";
+  const threatTone = threatScore >= 70 ? "danger" : threatScore >= 40 ? "warning" : "success";
+  const unresolvedViolations = riskOverview?.unresolvedViolations.total ?? policyViolations.length;
+  const reportingRate = riskOverview ? formatPercent(riskOverview.metrics.reportRate) : "--";
+  const clickRate = riskOverview ? formatPercent(riskOverview.metrics.clickRate) : "--";
+  const credentialRate = riskOverview ? formatPercent(riskOverview.metrics.credentialSubmitRate) : "--";
+  const quickActivity = auditItems.slice(0, 4);
+
   return (
     <main>
-      <div className="card">
-        <h1>EntornoSeguro - Stage 3 Demo</h1>
+      <header className="app-header" id="overview">
+        <div className="brand">
+          <div className="brand-mark">ES</div>
+          <div>
+            <h1>EntornoSeguro Console</h1>
+            <p className="muted">Phishing simulation and human risk training</p>
+          </div>
+        </div>
+        <div className="user-chip">
+          <span className="user-dot" />
+          <span>{me ? me.admin.role : "owner"}</span>
+        </div>
+      </header>
+
+      <section className="kpi-grid">
+        <article className="kpi-card">
+          <p className="kpi-label">Active simulations</p>
+          <p className="kpi-value">{activeSimulations}</p>
+          <p className="kpi-meta">Completed: {completedSimulations}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Employees covered</p>
+          <p className="kpi-value">{employees.length}</p>
+          <p className="kpi-meta">Tenant users in scope</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Risk score</p>
+          <p className="kpi-value">{threatScore}</p>
+          <p className={`kpi-meta tone-${threatTone}`}>{threatLabel}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Open violations</p>
+          <p className="kpi-value">{unresolvedViolations}</p>
+          <p className="kpi-meta">Manual review required</p>
+        </article>
+      </section>
+
+      <section className="threat-band">
+        <div className="threat-head">
+          <div>
+            <h2>Threat posture</h2>
+            <p className="muted">Conservative assessment with explainable score</p>
+          </div>
+          <span className={`status-pill tone-${threatTone}`}>{threatLabel}</span>
+        </div>
+        <div className="threat-track" aria-label="Threat score">
+          <span style={{ width: `${threatScore}%` }} />
+        </div>
+        <div className="threat-scale">
+          <span>Low</span>
+          <span>Moderate</span>
+          <span>High</span>
+        </div>
+        <div className="inline metrics-inline">
+          <span className="badge">Click {clickRate}</span>
+          <span className="badge">Credential {credentialRate}</span>
+          <span className="badge">Report {reportingRate}</span>
+        </div>
+      </section>
+
+      <section className="activity-shell">
+        <div className="activity-header">
+          <h2>Recent activity</h2>
+          <a href="#logs">View logs</a>
+        </div>
+        <ul className="activity-list">
+          {quickActivity.length === 0 ? (
+            <li>
+              <p className="muted">No critical actions yet.</p>
+            </li>
+          ) : (
+            quickActivity.map((item, index) => (
+              <li key={`${item.action}-${index}`}>
+                <div>
+                  <strong>{item.action.replaceAll("_", " ")}</strong>
+                  <p className="muted">{item.reason ?? "No reason provided"}</p>
+                </div>
+                <span className="muted">{formatTimeAgo(item.createdAt)}</span>
+              </li>
+            ))
+          )}
+        </ul>
+      </section>
+
+      <div className="banner card">
         <p className="muted">
-          Flujo visible: signup - setup domains - import CSV - campaign preview - schedule - dispatch - events - training - timeline - risk review.
+          Flow: signup - setup - import - campaign preview - schedule - dispatch - events - training - timeline - risk review.
         </p>
         <div className="inline">
           <span className="badge">demo-only</span>
-          <span className="muted">Lifecycle por defecto: sandbox</span>
+          <span className="muted">Default lifecycle: sandbox</span>
         </div>
         {statusMessage ? <p className="success">{statusMessage}</p> : null}
         {errorMessage ? <p className="error">{errorMessage}</p> : null}
@@ -890,7 +1016,7 @@ export default function HomePage() {
 
       {token && me ? (
         <div className="grid" style={{ marginTop: 16 }}>
-          <section className="card">
+          <section className="card" id="setup">
             <h2>2) Setup domains</h2>
             <p className="muted">
               Tenant: <strong>{me.tenant.name}</strong> ({me.admin.role}) - Default sending mode: <strong>{me.tenant.defaultSendingMode}</strong>
@@ -979,7 +1105,7 @@ export default function HomePage() {
             </div>
           </section>
 
-          <section className="card">
+          <section className="card" id="import">
             <h2>3) Import employees CSV</h2>
             <form onSubmit={handleImportEmployees}>
               <label htmlFor="csv">CSV content</label>
@@ -996,7 +1122,7 @@ export default function HomePage() {
             </ul>
           </section>
 
-          <section className="card">
+          <section className="card" id="campaigns">
             <h2>4) Campaign + training preview</h2>
             <form onSubmit={handleCreateCampaign}>
               <label htmlFor="campaign-name">Campaign name</label>
@@ -1098,7 +1224,7 @@ export default function HomePage() {
             ) : null}
           </section>
 
-          <section className="card">
+          <section className="card" id="simulation">
             <h2>5) Stage 2: recipients, events y training real</h2>
             <label htmlFor="recipient-select">Recipient</label>
             <select
@@ -1199,7 +1325,7 @@ export default function HomePage() {
             ) : null}
           </section>
 
-          <section className="card">
+          <section className="card" id="timeline">
             <h2>6) Timeline</h2>
             <label htmlFor="employee-select">Employee</label>
             <select
@@ -1234,7 +1360,7 @@ export default function HomePage() {
             ) : null}
           </section>
 
-          <section className="card">
+          <section className="card" id="risk">
             <h2>7) Stage 3: risk + manual enforcement</h2>
             <p className="muted">
               Score explicable con umbrales conservadores. Restricción de tenant solo con revisión manual.
@@ -1345,7 +1471,7 @@ export default function HomePage() {
             </p>
           </section>
 
-          <section className="card">
+          <section className="card" id="ops">
             <h2>8) Pause controls (global {">"} tenant {">"} campaign)</h2>
             <p className="muted">
               Bloquean nuevos envíos/programaciones; no bloquean ingestión de eventos.
@@ -1409,7 +1535,7 @@ export default function HomePage() {
             </div>
           </section>
 
-          <section className="card">
+          <section className="card" id="logs">
             <h2>9) Audit log (critical actions)</h2>
             <ul className="list">
               {auditItems.slice(0, 12).map((item, index) => (
@@ -1422,6 +1548,16 @@ export default function HomePage() {
             </ul>
           </section>
         </div>
+      ) : null}
+
+      {token && me ? (
+        <nav className="dock-nav" aria-label="Quick navigation">
+          <a href="#overview">Overview</a>
+          <a href="#setup">Setup</a>
+          <a href="#campaigns">Campaigns</a>
+          <a href="#risk">Risk</a>
+          <a href="#ops">Ops</a>
+        </nav>
       ) : null}
     </main>
   );
